@@ -29,7 +29,11 @@ A Spring Boot REST API for creating, scheduling, processing, and tracking notifi
 - **Docker Compose** (optional) for running MySQL
 
 ## Architecture
+## Architecture
 
+The following diagram illustrates the architecture of NotifyFlow, including the request flow and supporting components.
+
+![NotifyFlow Architecture](https://raw.githubusercontent.com/Anurag45pawar/Notifyflow/main/docs/notifyflow-architecture.png)
 The diagram below shows the main request flow and the supporting components used by the application.
 
 ![NotifyFlow architecture diagram](docs/notifyflow-architecture.png)
