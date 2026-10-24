@@ -1,0 +1,14 @@
+# Optional: run MySQL without installing it.  Usage:  docker compose up -d
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: notifyflow-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: notifyflow_db
+    ports:
+      - "3306:3306"
+    volumes:
+      - notifyflow-data:/var/lib/mysql
+volumes:
+  notifyflow-data:
