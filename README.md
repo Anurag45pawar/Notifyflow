@@ -4,7 +4,7 @@ A Spring Boot REST API for creating, scheduling, processing, and tracking notifi
 
 > **Delivery note:** The current project uses a simulated notification sender. A status of `SENT` means the application's simulated delivery flow completed successfully; it does not mean a real email or SMS was delivered.
 
-## Features
+## Features  
 
 - Create and retrieve notifications through REST APIs
 - Store notifications and delivery-attempt history in MySQL
