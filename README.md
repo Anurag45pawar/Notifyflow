@@ -1,159 +1,237 @@
 # NotifyFlow
 
-A notification backend built with **Java 21, Spring Boot, Spring MVC, Spring Data JPA and MySQL**.
+A Spring Boot REST API for creating, scheduling, processing, and tracking notifications. NotifyFlow stores notification records, processes eligible notifications in the background, records delivery attempts, and supports retry handling.
 
-Other applications (an e-commerce app, for example) call one REST API to create a notification.
-NotifyFlow saves it, delivers it in the background, tracks the status, retries failures with
-back-off, and keeps a delivery history for every notification.
+> **Delivery note:** The current project uses a simulated notification sender. A status of `SENT` means the application's simulated delivery flow completed successfully; it does not mean a real email or SMS was delivered.
 
-> Delivery is **simulated** (see `SimulatedNotificationSender`). Replacing it with a real email/SMS
-> provider means writing one new class that implements `NotificationSender`.
+## Features
 
-## Run it
+- Create and retrieve notifications through REST APIs
+- Store notifications and delivery-attempt history in MySQL
+- Process eligible notifications using a scheduled background worker
+- Track notification lifecycle states such as `PENDING`, `PROCESSING`, `SENT`, and `FAILED`
+- Record attempt counts and retry scheduling information
+- Retry failed notifications manually
+- Support an optional `Idempotency-Key` to help prevent duplicate notification creation
+- Validate request data and return structured API errors
+- Test endpoints using the included Postman collection
 
-**Requirements:** Java 21, Maven 3.9+, MySQL 8 (or Docker).
+## Tech Stack
 
-1. Start MySQL - either your own installation, or: `docker compose up -d`
-   (the compose file uses user `root`, password `root`).
-2. Set your MySQL credentials as environment variables (never commit passwords to GitHub):
-   - `DB_USERNAME` (default `root`)
-   - `DB_PASSWORD` (default empty)
-3. Start the application:
-   ```
-   mvn spring-boot:run
-   ```
-   In Eclipse: *File > Import > Existing Maven Projects*, then run `NotifyFlowApplication`
-   (set the environment variables in *Run Configurations > Environment*).
+- **Java 21**
+- **Spring Boot**
+- **Spring MVC** for REST endpoints
+- **Spring Data JPA** for persistence
+- **Hibernate** as the JPA provider in the current version
+- **MySQL** for persistent storage
+- **Maven** for dependency management and builds
+- **Postman** for API testing
+- **Docker Compose** (optional) for running MySQL
 
-The database `notifyflow_db` and its tables are created automatically on first start.
+## Architecture
 
-- API: http://localhost:8080/api/notifications
-- Swagger UI: http://localhost:8080/swagger-ui.html
-- Health: http://localhost:8080/actuator/health
+The diagram below shows the main request flow and the supporting components used by the application.
 
-Run the tests (they use an in-memory H2 database, so MySQL is not needed): `mvn test`
+![NotifyFlow architecture diagram](docs/notifyflow-architecture.png)
 
-## Try it
+### Request flow
+
+1. A client such as Postman sends an HTTP request to the REST controller.
+2. The controller receives the request and returns JSON responses.
+3. The service layer applies business rules and transaction boundaries.
+4. Spring Data JPA repositories access the database through the configured JPA provider.
+5. MySQL stores notification records and processing-attempt information.
+
+### Supporting components
+
+- **DTOs:** Request and response objects exchanged through the API.
+- **Entities:** Java classes mapped to database tables.
+- **Exception handler:** Converts application errors into consistent API error responses.
+
+### Background processing
+
+A scheduled worker periodically looks for notifications eligible for processing, invokes the notification sender, and records the outcome, status, and attempt information.
+
+## Requirements
+
+- JDK 21
+- Maven 3.9+ (or the Maven Wrapper if included)
+- MySQL 8+, or Docker with Docker Compose
+- Eclipse IDE or another Java IDE
+- Postman (optional, for testing the API)
+
+## Run Locally
+
+### 1. Get the project
+
+Clone the repository:
 
 ```bash
-# 1. Create a notification (returns 201 with status PENDING)
-curl -X POST http://localhost:8080/api/notifications \
-  -H "Content-Type: application/json" \
-  -d '{"recipient":"customer@example.com","message":"Your order #1052 has been confirmed.","channel":"EMAIL"}'
-
-# 2. A few seconds later the background worker has processed it
-curl http://localhost:8080/api/notifications/1
-curl http://localhost:8080/api/notifications/1/attempts
-
-# 3. Make a delivery that always fails, to watch the retries (10s, 20s, then FAILED)
-curl -X POST http://localhost:8080/api/notifications \
-  -H "Content-Type: application/json" \
-  -d '{"recipient":"customer@example.com","message":"[fail] test retries","channel":"EMAIL"}'
-
-# 4. Retry it manually once it is FAILED
-curl -X POST http://localhost:8080/api/notifications/2/retry
-
-# 5. Idempotency: the same key never creates a second notification
-curl -X POST http://localhost:8080/api/notifications \
-  -H "Content-Type: application/json" -H "Idempotency-Key: order-1052-confirmation" \
-  -d '{"recipient":"customer@example.com","message":"Order 1052 confirmed","channel":"EMAIL"}'
+git clone https://github.com/Anurag45pawar/Notifyflow.git
+cd Notifyflow
 ```
 
-A Postman collection is in `postman/NotifyFlow.postman_collection.json`.
+### 2. Start MySQL
 
-## API
+You can use an existing local MySQL installation, or start the database with Docker Compose if the project's `docker-compose.yml` is configured for your environment:
 
-| Method | Endpoint | Purpose | Success |
-|--------|----------|---------|---------|
-| POST | `/api/notifications` | Create (optional `Idempotency-Key` header) | 201 (200 if the key was already used) |
-| GET | `/api/notifications` | List all, newest first | 200 |
-| GET | `/api/notifications/{id}` | Get one | 200 |
-| GET | `/api/notifications/status/{status}` | Filter by `PENDING`, `PROCESSING`, `SENT`, `FAILED` | 200 |
-| PUT | `/api/notifications/{id}` | Update (only while `PENDING`) | 200 |
-| DELETE | `/api/notifications/{id}` | Delete with its history (not while `PROCESSING`) | 204 |
-| POST | `/api/notifications/{id}/retry` | Retry a `FAILED` notification | 200 |
-| GET | `/api/notifications/{id}/attempts` | Delivery history | 200 |
-
-Errors share one JSON shape. `400` = invalid input, `404` = not found, `409` = action not allowed
-in the current status.
-
-Validation rules: `recipient` and `message` are required; `channel` is `EMAIL`, `SMS` or `IN_APP`;
-an `EMAIL` recipient must be a valid email address; an `SMS` recipient must be a phone number.
-
-## How it works
-
-```
-Client --POST--> Controller --> Service --> Repository --> MySQL        (saves PENDING, returns at once)
-
-Every 5 seconds:
-Scheduler --> finds due PENDING notifications --> Processor (one at a time)
-   1. claim:    PENDING -> PROCESSING   (single atomic UPDATE, so only one worker can win)
-   2. deliver:  Sender.send(...)        (no database transaction is open during this call)
-   3. record:   success -> SENT
-                failure -> attempt saved, back to PENDING with a longer delay (10s, 20s, 40s ...)
-                           or FAILED when the attempts are used up
+```bash
+docker compose up -d
 ```
 
-Status lifecycle: `PENDING -> PROCESSING -> SENT`, or `PROCESSING -> PENDING` (retry) and finally `FAILED`.
-A `FAILED` notification can go back to `PENDING` through the retry endpoint.
+Check `docker-compose.yml` and `src/main/resources/application.properties` to confirm the database name, port, and credentials.
 
-### Persistence note: JPA vs Hibernate
+### 3. Configure database credentials
 
-The entity classes use standard `jakarta.persistence` annotations, and repository queries use JPQL.
-There are no direct `org.hibernate.*` API imports in the Java source. JPA is a specification, however,
-not a standalone implementation; Spring Data JPA still needs a JPA provider at runtime (Spring Boot
-selects Hibernate by default). The configuration in this version avoids Hibernate-specific properties.
-Schema creation is provider-dependent; for production, use a migration tool such as Flyway or Liquibase.
+Set the database environment variables expected by `application.properties`:
 
-### Design decisions worth explaining in an interview
+- `DB_USERNAME`
+- `DB_PASSWORD`
 
-- **No duplicate processing:** the claim step is `UPDATE ... SET status='PROCESSING' WHERE id=? AND status='PENDING'`.
-  The database applies it atomically; the worker that gets `1` updated row owns the notification, any other gets `0`.
-  This stays correct even if you run several instances of the application.
-- **No transaction during delivery:** a slow provider must not hold a database connection open. Each step
-  (claim, record result) is its own short transaction, which is why the logic lives in separate service methods.
-- **Crash recovery:** if the application dies mid-delivery, the row would stay `PROCESSING` forever. The scheduler
-  puts rows older than `notifyflow.processing-timeout-seconds` back in the queue. The trade-off is
-  *at-least-once* delivery: in rare crash cases a message can be delivered twice.
-- **Idempotency:** a unique `idempotency_key` column plus a catch for the unique-constraint violation, so
-  two simultaneous identical requests still produce one row.
-- **Why `attempt_count` / `max_attempts`:** attempt numbers keep increasing across manual retries, so the history
-  stays consistent. A manual retry simply raises `max_attempts` by another round.
-- **DTOs:** the API never exposes entities directly, so the database design can change without breaking clients.
+Do not commit real passwords, email credentials, API keys, or other secrets to GitHub. If your local configuration uses different variable names, use the names defined in your `application.properties`.
 
-## Configuration (`application.properties`)
+### 4. Run the application
 
-| Property | Default | Meaning |
-|----------|---------|---------|
-| `notifyflow.max-attempts` | 3 | Delivery attempts before `FAILED` |
-| `notifyflow.retry-delay-seconds` | 10 | First retry delay; doubles each time |
-| `notifyflow.batch-size` | 20 | Notifications handled per scheduler run |
-| `notifyflow.processing-timeout-seconds` | 60 | When a `PROCESSING` row counts as stuck |
-| `notifyflow.simulated-failure-rate` | 0.3 | Chance that a simulated delivery fails |
-| `notifyflow.scheduler.delay-ms` | 5000 | Pause between scheduler runs |
+From the project root:
 
-## Project structure
-
-```
-src/main/java/com/notifyflow
-├── NotifyFlowApplication.java
-├── controller/   NotificationController      (HTTP only)
-├── service/      NotificationService         (business rules, transactions)
-├── repository/   NotificationRepository, NotificationAttemptRepository
-├── entity/       Notification, NotificationAttempt
-├── dto/          NotificationRequest, NotificationResponse, AttemptResponse, ErrorResponse
-├── enums/        NotificationStatus, NotificationChannel, AttemptStatus
-├── exception/    custom exceptions + GlobalExceptionHandler
-├── scheduler/    NotificationScheduler       (background worker trigger)
-├── processor/    NotificationProcessor       (claim -> deliver -> record)
-├── delivery/     NotificationSender + SimulatedNotificationSender
-└── config/       NotifyFlowProperties, SchedulingConfig
+```bash
+mvn spring-boot:run
 ```
 
-## Ideas to take it further
+Or, in Eclipse:
 
-- Replace the scheduler with **Redis Streams** (or RabbitMQ/Kafka) for event-driven processing
-- Real email through `JavaMailSender` behind the `NotificationSender` interface
-- **Flyway** migrations instead of `ddl-auto=update`
-- Pagination on the list endpoints, Spring Security with API keys or JWT
-- A `Dockerfile` for the application and a GitHub Actions workflow that runs `mvn test`
+1. Choose **File → Import → Existing Maven Projects** if the project is not already imported.
+2. Select the folder containing `pom.xml`.
+3. Wait for Maven dependencies to finish downloading.
+4. Start MySQL.
+5. Open `NotifyFlowApplication.java`.
+6. Right-click it and select **Run As → Java Application**.
+
+The application is expected to start on port `8080`, unless configured otherwise.
+
+## API Endpoints
+
+Base URL: `http://localhost:8080`
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/notifications` | Create a notification |
+| `GET` | `/api/notifications` | List notifications |
+| `GET` | `/api/notifications/{id}` | Retrieve a notification by ID |
+| `GET` | `/api/notifications/status/{status}` | Filter notifications by status |
+| `PUT` | `/api/notifications/{id}` | Update a notification when allowed by its current state |
+| `DELETE` | `/api/notifications/{id}` | Delete a notification when allowed by its current state |
+| `POST` | `/api/notifications/{id}/retry` | Request another attempt for a failed notification |
+| `GET` | `/api/notifications/{id}/attempts` | Retrieve delivery-attempt history |
+
+Check the controller mappings in the source code if an endpoint differs in your checked-out version.
+
+## Example: Create a Notification
+
+In Postman, create a request with:
+
+- **Method:** `POST`
+- **URL:** `http://localhost:8080/api/notifications`
+- **Header:** `Content-Type: application/json`
+- **Body:** `raw` → `JSON`
+
+```json
+{
+  "recipient": "customer@example.com",
+  "message": "Your order has been confirmed.",
+  "channel": "EMAIL"
+}
+```
+
+A successful response should include a notification ID and an initial status such as `PENDING`. The scheduled worker can then process the notification in the background.
+
+## Example: Retrieve a Notification
+
+```http
+GET http://localhost:8080/api/notifications/1
+```
+
+The response includes fields such as the notification ID, recipient, message, channel, status, attempt count, and timestamps.
+
+## Notification Lifecycle
+
+```text
+PENDING -> PROCESSING -> SENT
+                 |
+                 +---- failure ----> PENDING (retry scheduled)
+                                      |
+                                      +---- attempts exhausted ----> FAILED
+```
+
+Exact transitions and retry timing depend on the application's configuration and implementation. The current sender is simulated, so this project demonstrates the notification-processing workflow rather than real email/SMS delivery.
+
+## Configuration
+
+Review `src/main/resources/application.properties` for:
+
+- Database URL and credentials
+- Server port
+- Scheduler interval
+- Batch size
+- Maximum delivery attempts
+- Retry delay
+- Processing timeout
+- Simulated failure settings
+
+Use environment variables for sensitive values rather than hard-coding secrets.
+
+## Testing
+
+Run automated tests from the project root:
+
+```bash
+mvn test
+```
+
+If the project includes a Postman collection, import:
+
+```text
+postman/NotifyFlow.postman_collection.json
+```
+
+Then start the application and run the requests in Postman.
+
+## Project Structure
+
+```text
+src/
+├── main/
+│   ├── java/com/notifyflow/
+│   │   ├── controller/   # REST endpoints
+│   │   ├── service/      # Business logic and transactions
+│   │   ├── repository/   # Spring Data JPA repositories
+│   │   ├── entity/       # JPA entity classes
+│   │   ├── dto/          # Request and response objects
+│   │   ├── enums/        # Status and channel values
+│   │   ├── exception/    # Exception handling
+│   │   ├── scheduler/    # Scheduled processing trigger
+│   │   ├── processor/    # Notification processing workflow
+│   │   ├── delivery/     # Notification sender abstraction and simulator
+│   │   └── config/       # Application and scheduling configuration
+│   └── resources/
+└── test/
+```
+
+Folder names may vary slightly by project revision.
+
+## Future Improvements
+
+- Integrate a real email provider using Spring's `JavaMailSender`
+- Add a real SMS provider
+- Add authentication and authorization
+- Add pagination and sorting to notification listing
+- Use Flyway or Liquibase for database migrations
+- Add Docker packaging for the Spring Boot application
+- Add CI with GitHub Actions to run tests automatically
+- Add metrics and structured logging for operational monitoring
+
+## Author
+
+**Anurag Pawar**
+
+GitHub: [Anurag45pawar](https://github.com/Anurag45pawar)
